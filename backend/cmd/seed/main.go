@@ -2,25 +2,58 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 
+	"github.com/brianvoe/gofakeit/v6"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
+const (
+	numUsers        = 20
+	numItems        = 30
+	numTransactions = 50
+)
+
+var schools = []string{
+	"State University", "City College", "Tech Institute",
+	"Riverside University", "Northern College", "Eastside Community College",
+}
+
+var categories = []string{
+	"textbooks", "electronics", "clothing", "furniture", "sports", "music", "other",
+}
+
 func main() {
-	_ = godotenv.Load("../../.env") // falls back to real env vars if file absent
+	_ = godotenv.Load("../../.env")
 
 	if os.Getenv("APP_ENV") == "production" {
 		log.Fatal("refusing to seed in production")
 	}
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "root:@tcp(127.0.0.1:3306)/nova?parseTime=true"
+	user := os.Getenv("DB_USERNAME")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+
+	if user == "" {
+		user = "root"
 	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "3306"
+	}
+	if name == "" {
+		name = "nova"
+	}
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, pass, host, port, name)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -32,15 +65,14 @@ func main() {
 	}
 
 	truncate(db)
-	seedUsers(db)
-	seedItems(db)
-	seedTransactions(db)
+	userIDs := seedUsers(db)
+	itemIDs := seedItems(db)
+	seedTransactions(db, userIDs, itemIDs)
 
 	log.Println("seed complete")
 }
 
 func truncate(db *sql.DB) {
-	// FK order: transactions -> items -> users
 	for _, table := range []string{"transactions", "items", "users"} {
 		if _, err := db.Exec("DELETE FROM " + table); err != nil {
 			log.Fatalf("truncate %s: %v", table, err)
@@ -57,17 +89,7 @@ func hash(password string) string {
 	return string(b)
 }
 
-func seedUsers(db *sql.DB) {
-	users := []struct {
-		email    string
-		school   string
-		password string
-		goodwill int
-	}{
-		{"alice@university.edu", "State University", "password123", 10},
-		{"bob@college.edu", "City College", "password123", 5},
-	}
-
+func seedUsers(db *sql.DB) []int64 {
 	const q = `
 		INSERT INTO users (email, school, hashed_password, goodwill_points)
 		VALUES (?, ?, ?, ?)
@@ -76,15 +98,26 @@ func seedUsers(db *sql.DB) {
 			hashed_password = VALUES(hashed_password),
 			goodwill_points = VALUES(goodwill_points)`
 
-	for _, u := range users {
-		if _, err := db.Exec(q, u.email, u.school, hash(u.password), u.goodwill); err != nil {
-			log.Fatalf("insert user %s: %v", u.email, err)
+	hashedPw := hash("password123")
+	var ids []int64
+
+	for i := 0; i < numUsers; i++ {
+		email := gofakeit.Email()
+		school := schools[gofakeit.Number(0, len(schools)-1)]
+		goodwill := gofakeit.Number(0, 50)
+
+		res, err := db.Exec(q, email, school, hashedPw, goodwill)
+		if err != nil {
+			log.Fatalf("insert user: %v", err)
 		}
-		log.Printf("upserted user %s", u.email)
+		id, _ := res.LastInsertId()
+		ids = append(ids, id)
+		log.Printf("inserted user %s", email)
 	}
+	return ids
 }
 
-func seedItems(db *sql.DB) {
+func seedItems(db *sql.DB) []int64 {
 	const q = `
 		INSERT INTO items (name, description, value, category)
 		VALUES (?, ?, ?, ?)
@@ -93,32 +126,47 @@ func seedItems(db *sql.DB) {
 			value       = VALUES(value),
 			category    = VALUES(category)`
 
-	if _, err := db.Exec(q, "Calculus Textbook", "8th edition, minor highlights", 35.00, "textbooks"); err != nil {
-		log.Fatal("insert item:", err)
+	var ids []int64
+
+	for i := 0; i < numItems; i++ {
+		name := fmt.Sprintf("%s %s", gofakeit.AdjectiveDescriptive(), gofakeit.NounAbstract())
+		description := gofakeit.Sentence(8)
+		value := gofakeit.Price(1, 200)
+		category := categories[gofakeit.Number(0, len(categories)-1)]
+
+		res, err := db.Exec(q, name, description, value, category)
+		if err != nil {
+			log.Fatalf("insert item: %v", err)
+		}
+		id, _ := res.LastInsertId()
+		ids = append(ids, id)
+		log.Printf("inserted item %q ($%.2f)", name, value)
 	}
-	log.Println("upserted item: Calculus Textbook")
+	return ids
 }
 
-func seedTransactions(db *sql.DB) {
-	var giverID, receiverID, itemID int64
-
-	if err := db.QueryRow(`SELECT id FROM users WHERE email = ?`, "alice@university.edu").Scan(&giverID); err != nil {
-		log.Fatal("lookup alice:", err)
-	}
-	if err := db.QueryRow(`SELECT id FROM users WHERE email = ?`, "bob@college.edu").Scan(&receiverID); err != nil {
-		log.Fatal("lookup bob:", err)
-	}
-	if err := db.QueryRow(`SELECT id FROM items WHERE name = ?`, "Calculus Textbook").Scan(&itemID); err != nil {
-		log.Fatal("lookup item:", err)
-	}
-
-	// reviewed=1, review=1 (as advertised)
+func seedTransactions(db *sql.DB, userIDs, itemIDs []int64) {
 	const q = `
 		INSERT INTO transactions (user_giving, user_receiving, item_id, reviewed, review)
-		VALUES (?, ?, ?, 1, 1)`
+		VALUES (?, ?, ?, ?, ?)`
 
-	if _, err := db.Exec(q, giverID, receiverID, itemID); err != nil {
-		log.Fatal("insert transaction:", err)
+	for i := 0; i < numTransactions; i++ {
+		giver := userIDs[gofakeit.Number(0, len(userIDs)-1)]
+		receiver := userIDs[gofakeit.Number(0, len(userIDs)-1)]
+		for receiver == giver {
+			receiver = userIDs[gofakeit.Number(0, len(userIDs)-1)]
+		}
+		item := itemIDs[gofakeit.Number(0, len(itemIDs)-1)]
+
+		reviewed := gofakeit.Number(0, 1)
+		var review interface{}
+		if reviewed == 1 {
+			review = gofakeit.Number(0, 1)
+		}
+
+		if _, err := db.Exec(q, giver, receiver, item, reviewed, review); err != nil {
+			log.Fatalf("insert transaction: %v", err)
+		}
+		log.Printf("inserted transaction: user %d -> user %d, item %d", giver, receiver, item)
 	}
-	log.Printf("inserted transaction: user %d -> user %d, item %d", giverID, receiverID, itemID)
 }

@@ -1,38 +1,41 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"nova_hackathon_2026/handlers"
 	"os"
 
-	_ "github.com/go-sql-driver/mysql" // Blank import required for the driver
 	"github.com/joho/godotenv"
+	"nova_hackathon_2026/db"
+	"nova_hackathon_2026/handlers"
 )
 
 func main() {
-	// 1. Load the .env file from one directory up
-	err := godotenv.Load("../.env")
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+	_ = godotenv.Load("../.env")
+
+	user := os.Getenv("DB_USERNAME")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+
+	if user == "" {
+		user = "root"
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "3306"
+	}
+	if name == "" {
+		name = "nova"
 	}
 
-	// 2. Build the connection string (DSN)
-	dbUser := os.Getenv("DB_USERNAME")
-	dbPass := os.Getenv("DB_PASSWORD")
-	dbHost := os.Getenv("DB_HOST")
-	dbPort := os.Getenv("DB_PORT")
-	dbName := os.Getenv("DB_NAME")
-
-	// Print DB connection info
-	fmt.Printf("Connecting to DB: user=%s, host=%s, port=%s, name=%s\n", dbUser, dbHost, dbPort, dbName)
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", dbUser, dbPass, dbHost, dbPort, dbName)
-
-	// 3. Initialize the database connection pool
-	db, err := sql.Open("mysql", dsn)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, pass, host, port, name)
+	database, err := db.Init(dsn)
 	if err != nil {
 		log.Fatalf("Failed to open DB connection: %v", err)
 	}
