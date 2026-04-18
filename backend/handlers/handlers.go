@@ -3,109 +3,286 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
+	"strconv"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
-type Handler struct{ db *sql.DB }
-
-func New(db *sql.DB) *Handler { return &Handler{db: db} }
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+// Handler holds the database connection pool
+type Handler struct {
+	DB *sql.DB
 }
 
-func (h *Handler) Users(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, email, school, goodwill_points, profile_picture, created_at FROM users`)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func New(db *sql.DB) *Handler {
+	return &Handler{DB: db}
+}
+
+// --- SIGN UP ---
+
+type SignUpRequest struct {
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	School         string `json:"school"`
+	ProfilePicture string `json:"profile_picture"`
+}
+
+func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer rows.Close()
 
-	type User struct {
-		ID             int64          `json:"id"`
-		Email          string         `json:"email"`
-		School         sql.NullString `json:"school"`
-		GoodwillPoints int            `json:"goodwill_points"`
-		ProfilePicture sql.NullString `json:"profile_picture"`
-		CreatedAt      string         `json:"created_at"`
+	var req SignUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
 	}
-	var users []User
-	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.School, &u.GoodwillPoints, &u.ProfilePicture, &u.CreatedAt); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+	if req.Email == "" || req.Password == "" {
+		http.Error(w, "Email and password are required", http.StatusBadRequest)
+		return
+	}
+
+	// Hash the password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Failed to hash password: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Insert into DB
+	query := `INSERT INTO users (email, school, hashed_password, profile_picture) VALUES (?, ?, ?, ?)`
+	result, err := h.DB.Exec(query, req.Email, req.School, string(hashedPassword), req.ProfilePicture)
+	if err != nil {
+		log.Printf("Failed to insert user: %v", err)
+		http.Error(w, "Failed to create user (email might already exist)", http.StatusConflict)
+		return
+	}
+
+	userID, _ := result.LastInsertId()
+
+	// THE HACKATHON COOKIE DROP
+	http.SetCookie(w, &http.Cookie{
+		Name:     "user_id",
+		Value:    fmt.Sprintf("%d", userID),
+		Path:     "/",
+		HttpOnly: true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "User created and signed in successfully",
+		"user_id": userID,
+	})
+}
+
+// --- SIGN IN ---
+
+type SignInRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (h *Handler) SignIn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SignInRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Fetch the user's ID and hashed password from the database
+	var userID int64
+	var dbHash string
+
+	query := `SELECT id, hashed_password FROM users WHERE email = ?`
+	err := h.DB.QueryRow(query, req.Email).Scan(&userID, &dbHash)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Don't tell them if it's the email or password that was wrong
+			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}
-		users = append(users, u)
+		log.Printf("Database error during sign in: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
-	if users == nil {
-		users = []User{}
+
+	// 2. Compare the provided password with the stored hash
+	err = bcrypt.CompareHashAndPassword([]byte(dbHash), []byte(req.Password))
+	if err != nil {
+		// Passwords didn't match
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
 	}
-	writeJSON(w, users)
+
+	// 3. Password matches! Drop the cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "user_id",
+		Value:    fmt.Sprintf("%d", userID),
+		Path:     "/",
+		HttpOnly: true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Signed in successfully",
+		"user_id": userID,
+	})
 }
 
-func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, name, description, value, category, picture, created_at FROM items`)
+// Item maps directly to your MySQL items table
+type Item struct {
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"` // Pointer allows this to safely be NULL
+	Value       float64 `json:"value"`       // Maps nicely from decimal(10,2)
+	Category    *string `json:"category"`
+	Picture     *string `json:"picture"`
+	CreatedAt   string  `json:"created_at"`
+}
+
+// GetItems handles the GET /api/items route
+func (h *Handler) GetItems(w http.ResponseWriter, r *http.Request) {
+	// 1. Only allow GET requests
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 2. Parse the 'page' parameter from the URL (e.g., /api/items?page=2)
+	pageStr := r.URL.Query().Get("page")
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		page = 1 // Default to page 1 if they don't provide it or send garbage
+	}
+
+	// 3. The Pagination Math
+	limit := 20
+	offset := (page - 1) * limit // Page 1 skips 0, Page 2 skips 20, etc.
+
+	// 4. Query the database
+	// We order by created_at DESC so the newest marketplace items show up first
+	query := `
+		SELECT id, name, description, value, category, picture, created_at 
+		FROM items 
+		ORDER BY created_at DESC 
+		LIMIT ? OFFSET ?
+	`
+
+	rows, err := h.DB.Query(query, limit, offset)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Database query failed: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	type Item struct {
-		ID          int64          `json:"id"`
-		Name        string         `json:"name"`
-		Description sql.NullString `json:"description"`
-		Value       float64        `json:"value"`
-		Category    sql.NullString `json:"category"`
-		Picture     sql.NullString `json:"picture"`
-		CreatedAt   string         `json:"created_at"`
-	}
+	// 5. Parse the rows into our Go slice
 	var items []Item
 	for rows.Next() {
-		var i Item
-		if err := rows.Scan(&i.ID, &i.Name, &i.Description, &i.Value, &i.Category, &i.Picture, &i.CreatedAt); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		var item Item
+		if err := rows.Scan(
+			&item.ID,
+			&item.Name,
+			&item.Description,
+			&item.Value,
+			&item.Category,
+			&item.Picture,
+			&item.CreatedAt,
+		); err != nil {
+			log.Printf("Failed to scan item row: %v", err)
+			continue // Skip broken rows so the whole API doesn't crash
 		}
-		items = append(items, i)
+		items = append(items, item)
 	}
+
+	// Handle the edge case where the database is empty
 	if items == nil {
 		items = []Item{}
 	}
-	writeJSON(w, items)
+
+	// 6. Return the paginated response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"current_page": page,
+		"items_count":  len(items),
+		"items":        items,
+	})
 }
 
-func (h *Handler) Transactions(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, user_giving, user_receiving, item_id, reviewed, review, created_at FROM transactions`)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+// AddItemRequest defines the incoming JSON payload
+// We use pointers (*string) for fields that can be NULL in the database
+type AddItemRequest struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	Value       float64 `json:"value"`
+	Category    *string `json:"category"`
+	Picture     *string `json:"picture"`
+}
+
+// AddItem handles POST /api/items
+func (h *Handler) AddItem(w http.ResponseWriter, r *http.Request) {
+	// 1. Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer rows.Close()
 
-	type Transaction struct {
-		ID            int64        `json:"id"`
-		UserGiving    int64        `json:"user_giving"`
-		UserReceiving int64        `json:"user_receiving"`
-		ItemID        int64        `json:"item_id"`
-		Reviewed      bool         `json:"reviewed"`
-		Review        sql.NullBool `json:"review"`
-		CreatedAt     string       `json:"created_at"`
+	// 2. THE HACKATHON AUTH CHECK
+	// If they don't have a cookie, bounce them immediately
+	_, err := r.Cookie("user_id")
+	if err != nil {
+		http.Error(w, "Unauthorized - Please sign in to post items", http.StatusUnauthorized)
+		return
 	}
-	var txs []Transaction
-	for rows.Next() {
-		var t Transaction
-		if err := rows.Scan(&t.ID, &t.UserGiving, &t.UserReceiving, &t.ItemID, &t.Reviewed, &t.Review, &t.CreatedAt); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		txs = append(txs, t)
+
+	// 3. Parse the incoming JSON
+	var req AddItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
 	}
-	if txs == nil {
-		txs = []Transaction{}
+
+	// Basic validation
+	if req.Name == "" {
+		http.Error(w, "Item name is required", http.StatusBadRequest)
+		return
 	}
-	writeJSON(w, txs)
+
+	// 4. Insert into the database
+	query := `
+		INSERT INTO items (name, description, value, category, picture) 
+		VALUES (?, ?, ?, ?, ?)
+	`
+
+	result, err := h.DB.Exec(query, req.Name, req.Description, req.Value, req.Category, req.Picture)
+	if err != nil {
+		log.Printf("Failed to insert item: %v", err)
+		http.Error(w, "Failed to create item (name might already exist)", http.StatusConflict)
+		return
+	}
+
+	// 5. Get the new Item ID
+	itemID, _ := result.LastInsertId()
+
+	// 6. Return success response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Item added to marketplace",
+		"item_id": itemID,
+	})
 }
