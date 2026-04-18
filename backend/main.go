@@ -68,11 +68,13 @@ func main() {
 		case http.MethodGet:
 			h.GetItems(w, r) // Your pagination function
 		case http.MethodPost:
-			h.AddItem(w, r) // The new function we just wrote
+			h.AddItem(w, r)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	http.HandleFunc("/api/transactions/request", h.RequestItem)
+	http.HandleFunc("/api/transactions/respond", h.RespondToRequest)
 
 	// 6. Start the server
 	port := ":8080"

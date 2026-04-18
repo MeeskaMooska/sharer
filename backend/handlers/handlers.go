@@ -224,7 +224,6 @@ func (h *Handler) GetItems(w http.ResponseWriter, r *http.Request) {
 }
 
 // AddItemRequest defines the incoming JSON payload
-// We use pointers (*string) for fields that can be NULL in the database
 type AddItemRequest struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description"`
@@ -242,8 +241,8 @@ func (h *Handler) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. THE HACKATHON AUTH CHECK
-	// If they don't have a cookie, bounce them immediately
-	_, err := r.Cookie("user_id")
+	// FIX: Actually save the cookie variable instead of using '_'
+	cookie, err := r.Cookie("user_id")
 	if err != nil {
 		http.Error(w, "Unauthorized - Please sign in to post items", http.StatusUnauthorized)
 		return
@@ -263,12 +262,15 @@ func (h *Handler) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Insert into the database
+	userID := cookie.Value
+
 	query := `
-		INSERT INTO items (name, description, value, category, picture) 
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO items (user_id, name, description, value, category, picture) 
+		VALUES (?, ?, ?, ?, ?, ?)
 	`
 
-	result, err := h.DB.Exec(query, req.Name, req.Description, req.Value, req.Category, req.Picture)
+	// FIX: Add userID as the very first argument to match the ? placeholders
+	result, err := h.DB.Exec(query, userID, req.Name, req.Description, req.Value, req.Category, req.Picture)
 	if err != nil {
 		log.Printf("Failed to insert item: %v", err)
 		http.Error(w, "Failed to create item (name might already exist)", http.StatusConflict)
@@ -284,5 +286,141 @@ func (h *Handler) AddItem(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Item added to marketplace",
 		"item_id": itemID,
+	})
+}
+
+// --- 1. REQUEST AN ITEM ---
+
+type RequestItemPayload struct {
+	ItemID int64 `json:"item_id"`
+}
+
+func (h *Handler) RequestItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Auth Check: Who is asking for the item?
+	cookie, err := r.Cookie("user_id")
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	requesterID, _ := strconv.ParseInt(cookie.Value, 10, 64)
+
+	var req RequestItemPayload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	// Find out who owns the item
+	var ownerID int64
+	err = h.DB.QueryRow("SELECT user_id FROM items WHERE id = ?", req.ItemID).Scan(&ownerID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Item not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	if ownerID == requesterID {
+		http.Error(w, "You cannot request your own item", http.StatusBadRequest)
+		return
+	}
+
+	// Insert the pending transaction
+	query := `INSERT INTO transactions (user_giving, user_receiving, item_id) VALUES (?, ?, ?)`
+	result, err := h.DB.Exec(query, ownerID, requesterID, req.ItemID)
+	if err != nil {
+		log.Printf("Failed to insert transaction: %v", err)
+		http.Error(w, "Could not create request", http.StatusInternalServerError)
+		return
+	}
+
+	txID, _ := result.LastInsertId()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":        "Item requested successfully! Waiting for owner approval.",
+		"transaction_id": txID,
+		"status":         "pending",
+	})
+}
+
+// --- 2. RESPOND TO A REQUEST ---
+
+type RespondPayload struct {
+	TransactionID int64  `json:"transaction_id"`
+	Action        string `json:"action"` // Expects "accept" or "reject"
+}
+
+func (h *Handler) RespondToRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Auth Check: Who is responding?
+	cookie, err := r.Cookie("user_id")
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	responderID, _ := strconv.ParseInt(cookie.Value, 10, 64)
+
+	var req RespondPayload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.Action != "accept" && req.Action != "reject" {
+		http.Error(w, "Action must be 'accept' or 'reject'", http.StatusBadRequest)
+		return
+	}
+
+	// Verify the transaction exists AND the responder is actually the owner (user_giving)
+	var ownerID int64
+	var currentStatus string
+	err = h.DB.QueryRow("SELECT user_giving, status FROM transactions WHERE id = ?", req.TransactionID).Scan(&ownerID, &currentStatus)
+
+	if err == sql.ErrNoRows {
+		http.Error(w, "Transaction not found", http.StatusNotFound)
+		return
+	}
+
+	if ownerID != responderID {
+		http.Error(w, "Forbidden: You do not own this item", http.StatusForbidden)
+		return
+	}
+
+	if currentStatus != "pending" {
+		http.Error(w, "This request has already been processed", http.StatusBadRequest)
+		return
+	}
+
+	// Update the transaction status
+	newStatus := "accepted"
+	if req.Action == "reject" {
+		newStatus = "rejected"
+	}
+
+	_, err = h.DB.Exec("UPDATE transactions SET status = ? WHERE id = ?", newStatus, req.TransactionID)
+	if err != nil {
+		log.Printf("Failed to update transaction: %v", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":        "Transaction " + newStatus,
+		"transaction_id": req.TransactionID,
 	})
 }
