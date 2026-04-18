@@ -1,0 +1,13 @@
+.env
+
+# Go
+backend/app.db
+backend/*.db-shm
+backend/*.db-wal
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
