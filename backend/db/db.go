@@ -34,6 +34,7 @@ func Migrate(db *sql.DB) error {
 			user_id     INTEGER NOT NULL REFERENCES users(id),
 			description TEXT,
 			price       REAL    NOT NULL DEFAULT 0,
+			category    TEXT    NOT NULL DEFAULT 'misc',
 			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS transactions (

@@ -49,7 +49,7 @@ func (h *Handler) Users(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, name, user_id, description, price, created_at FROM items`)
+	rows, err := h.db.Query(`SELECT id, name, user_id, description, price, category, created_at FROM items`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -62,12 +62,13 @@ func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
 		UserID      int64   `json:"user_id"`
 		Description string  `json:"description"`
 		Price       float64 `json:"price"`
+		Category    string  `json:"category"`
 		CreatedAt   string  `json:"created_at"`
 	}
 	var items []Item
 	for rows.Next() {
 		var i Item
-		if err := rows.Scan(&i.ID, &i.Name, &i.UserID, &i.Description, &i.Price, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Name, &i.UserID, &i.Description, &i.Price, &i.Category, &i.CreatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
