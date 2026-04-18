@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 
@@ -11,16 +12,32 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load("../../.env") // falls back to real env vars if file absent
+	_ = godotenv.Load("../../.env")
 
 	if os.Getenv("APP_ENV") == "production" {
 		log.Fatal("refusing to seed in production")
 	}
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "root:@tcp(127.0.0.1:3306)/nova?parseTime=true"
+	user := os.Getenv("DB_USERNAME")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+
+	if user == "" {
+		user = "root"
 	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "3306"
+	}
+	if name == "" {
+		name = "nova"
+	}
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, pass, host, port, name)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
