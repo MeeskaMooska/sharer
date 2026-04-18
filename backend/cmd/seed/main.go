@@ -18,17 +18,60 @@ const (
 	numTransactions = 50
 )
 
-var schools = []string{
-	"State University", "City College", "Tech Institute",
-	"Riverside University", "Northern College", "Eastside Community College",
+var emojis = []string{
+	"🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼",
+	"🐨", "🐯", "🦁", "🐮", "🐸", "🐙", "🦋", "🐺",
+	"🦄", "🐲", "🌵", "🍄",
 }
 
-var categories = []string{
-	"textbooks", "electronics", "clothing", "furniture", "sports", "music", "other",
+var eduDomains = []string{
+	"mit.edu", "stanford.edu", "harvard.edu", "unc.edu",
+	"gatech.edu", "umich.edu", "berkeley.edu", "nyu.edu",
+}
+
+var schools = []string{
+	"MIT", "Stanford", "Harvard", "UNC Chapel Hill",
+	"Georgia Tech", "University of Michigan", "UC Berkeley", "NYU",
+}
+
+type categoryItems struct {
+	category string
+	names    []string
+}
+
+var itemCatalog = []categoryItems{
+	{
+		category: "dorm supplies",
+		names: []string{
+			"Mini Fridge", "Desk Lamp", "Twin XL Bedding Set", "Storage Bins",
+			"Box Fan", "Power Strip", "Shower Caddy", "Over-Door Organizer",
+			"Laundry Hamper", "Whiteboard",
+		},
+	},
+	{
+		category: "school supplies",
+		names: []string{
+			"Scientific Calculator", "Backpack", "Notebook Set", "Binder Pack",
+			"Highlighter Set", "Pencil Case", "Laptop Stand", "Planner",
+			"Stapler", "Wireless Mouse",
+		},
+	},
+	{
+		category: "misc",
+		names: []string{
+			"Coffee Maker", "Bluetooth Speaker", "Bike Lock", "Umbrella",
+			"Yoga Mat", "Reusable Water Bottle", "Headphones", "Desk Chair",
+			"Floor Lamp", "Microwave",
+		},
+	},
 }
 
 func main() {
-	_ = godotenv.Load("../../.env")
+	for _, p := range []string{".env", "../.env", "../../.env"} {
+		if godotenv.Load(p) == nil {
+			break
+		}
+	}
 
 	if os.Getenv("APP_ENV") == "production" {
 		log.Fatal("refusing to seed in production")
@@ -91,28 +134,31 @@ func hash(password string) string {
 
 func seedUsers(db *sql.DB) []int64 {
 	const q = `
-		INSERT INTO users (email, school, hashed_password, goodwill_points)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO users (email, school, hashed_password, goodwill_points, profile_picture)
+		VALUES (?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			school          = VALUES(school),
 			hashed_password = VALUES(hashed_password),
-			goodwill_points = VALUES(goodwill_points)`
+			goodwill_points = VALUES(goodwill_points),
+			profile_picture = VALUES(profile_picture)`
 
 	hashedPw := hash("password123")
 	var ids []int64
 
 	for i := 0; i < numUsers; i++ {
-		email := gofakeit.Email()
+		domain := eduDomains[gofakeit.Number(0, len(eduDomains)-1)]
+		email := fmt.Sprintf("%s.%s@%s", gofakeit.FirstName(), gofakeit.LastName(), domain)
 		school := schools[gofakeit.Number(0, len(schools)-1)]
 		goodwill := gofakeit.Number(0, 50)
+		emoji := emojis[gofakeit.Number(0, len(emojis)-1)]
 
-		res, err := db.Exec(q, email, school, hashedPw, goodwill)
+		res, err := db.Exec(q, email, school, hashedPw, goodwill, emoji)
 		if err != nil {
 			log.Fatalf("insert user: %v", err)
 		}
 		id, _ := res.LastInsertId()
 		ids = append(ids, id)
-		log.Printf("inserted user %s", email)
+		log.Printf("inserted user %s %s (%s)", emoji, email, school)
 	}
 	return ids
 }
@@ -129,18 +175,18 @@ func seedItems(db *sql.DB) []int64 {
 	var ids []int64
 
 	for i := 0; i < numItems; i++ {
-		name := fmt.Sprintf("%s %s", gofakeit.AdjectiveDescriptive(), gofakeit.NounAbstract())
+		cat := itemCatalog[gofakeit.Number(0, len(itemCatalog)-1)]
+		name := cat.names[gofakeit.Number(0, len(cat.names)-1)]
 		description := gofakeit.Sentence(8)
-		value := gofakeit.Price(1, 200)
-		category := categories[gofakeit.Number(0, len(categories)-1)]
+		value := gofakeit.Price(1, 150)
 
-		res, err := db.Exec(q, name, description, value, category)
+		res, err := db.Exec(q, name, description, value, cat.category)
 		if err != nil {
 			log.Fatalf("insert item: %v", err)
 		}
 		id, _ := res.LastInsertId()
 		ids = append(ids, id)
-		log.Printf("inserted item %q ($%.2f)", name, value)
+		log.Printf("inserted item [%s] %q ($%.2f)", cat.category, name, value)
 	}
 	return ids
 }

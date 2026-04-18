@@ -38,7 +38,6 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS items (
 			id          BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			name        VARCHAR(255)  NOT NULL UNIQUE,
-			FOREIGN KEY (user_id) REFERENCES users(id),
 			description TEXT,
 			value       DECIMAL(10,2) NOT NULL DEFAULT 0,
 			category    VARCHAR(100),
