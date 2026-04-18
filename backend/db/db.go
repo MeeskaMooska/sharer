@@ -3,14 +3,20 @@ package db
 import (
 	"database/sql"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/go-sql-driver/mysql"
 )
 
-func Init(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on")
+func Init(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
@@ -21,26 +27,35 @@ func Init(path string) (*sql.DB, error) {
 func migrate(db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS users (
-			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			username   TEXT    NOT NULL UNIQUE,
-			email      TEXT    NOT NULL UNIQUE,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
+			id              BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			email           VARCHAR(255) NOT NULL UNIQUE,
+			school          VARCHAR(255),
+			hashed_password VARCHAR(255) NOT NULL,
+			goodwill_points INT          NOT NULL DEFAULT 0,
+			profile_picture VARCHAR(512),
+			created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP
+		) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS items (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			name        TEXT    NOT NULL,
+			id          BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			name        VARCHAR(255)  NOT NULL UNIQUE,
 			description TEXT,
-			price       REAL    NOT NULL DEFAULT 0,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
+			value       DECIMAL(10,2) NOT NULL DEFAULT 0,
+			category    VARCHAR(100),
+			picture     VARCHAR(512),
+			created_at  DATETIME      DEFAULT CURRENT_TIMESTAMP
+		) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS transactions (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id     INTEGER NOT NULL REFERENCES users(id),
-			item_id     INTEGER NOT NULL REFERENCES items(id),
-			quantity    INTEGER NOT NULL DEFAULT 1,
-			total_price REAL    NOT NULL,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
+			id             BIGINT     NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			user_giving    BIGINT     NOT NULL,
+			user_receiving BIGINT     NOT NULL,
+			item_id        BIGINT     NOT NULL,
+			reviewed       TINYINT(1) NOT NULL DEFAULT 0,
+			review         TINYINT(1),
+			created_at     DATETIME   DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_giving)    REFERENCES users(id),
+			FOREIGN KEY (user_receiving) REFERENCES users(id),
+			FOREIGN KEY (item_id)        REFERENCES items(id)
+		) ENGINE=InnoDB`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
