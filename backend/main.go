@@ -3,13 +3,18 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"nova_hackathon_2026/db"
 	"nova_hackathon_2026/handlers"
 )
 
 func main() {
-	database, err := db.Init("app.db")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "root:@tcp(127.0.0.1:3306)/nova?parseTime=true"
+	}
+	database, err := db.Init(dsn)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -1,9 +1,7 @@
 .env
 
-# Go
-backend/app.db
-backend/*.db-shm
-backend/*.db-wal
+# Go binary
+backend/nova
 
 # macOS
 .DS_Store
