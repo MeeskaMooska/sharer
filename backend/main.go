@@ -24,6 +24,7 @@ func main() {
 	mux.HandleFunc("/api/users", h.Users)
 	mux.HandleFunc("/api/items", h.Items)
 	mux.HandleFunc("/api/transactions", h.Transactions)
+	mux.HandleFunc("/api/transactions/", h.Transactions)
 
 	log.Println("Listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))

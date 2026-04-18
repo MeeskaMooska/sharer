@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 type Handler struct{ db *sql.DB }
@@ -16,7 +18,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (h *Handler) Users(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, username, email, created_at FROM users`)
+	rows, err := h.db.Query(`SELECT id, username, email, profile_picture, goodwill_points, created_at FROM users`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -24,15 +26,17 @@ func (h *Handler) Users(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type User struct {
-		ID        int64  `json:"id"`
-		Username  string `json:"username"`
-		Email     string `json:"email"`
-		CreatedAt string `json:"created_at"`
+		ID             int64          `json:"id"`
+		Username       string         `json:"username"`
+		Email          string         `json:"email"`
+		ProfilePicture sql.NullString `json:"profile_picture"`
+		GoodwillPoints int            `json:"goodwill_points"`
+		CreatedAt      string         `json:"created_at"`
 	}
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.ProfilePicture, &u.GoodwillPoints, &u.CreatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -45,7 +49,7 @@ func (h *Handler) Users(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, name, description, price, created_at FROM items`)
+	rows, err := h.db.Query(`SELECT id, name, user_id, description, price, created_at FROM items`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -55,6 +59,7 @@ func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
 	type Item struct {
 		ID          int64   `json:"id"`
 		Name        string  `json:"name"`
+		UserID      int64   `json:"user_id"`
 		Description string  `json:"description"`
 		Price       float64 `json:"price"`
 		CreatedAt   string  `json:"created_at"`
@@ -62,7 +67,7 @@ func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
 	var items []Item
 	for rows.Next() {
 		var i Item
-		if err := rows.Scan(&i.ID, &i.Name, &i.Description, &i.Price, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Name, &i.UserID, &i.Description, &i.Price, &i.CreatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -74,8 +79,20 @@ func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, items)
 }
 
+// Transactions handles GET /api/transactions and PATCH /api/transactions/{id}
 func (h *Handler) Transactions(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(`SELECT id, user_id, item_id, quantity, total_price, created_at FROM transactions`)
+	switch r.Method {
+	case http.MethodGet:
+		h.listTransactions(w, r)
+	case http.MethodPatch:
+		h.completeTransaction(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.db.Query(`SELECT id, user_id, item_id, quantity, total_price, completed, created_at FROM transactions`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -88,12 +105,13 @@ func (h *Handler) Transactions(w http.ResponseWriter, r *http.Request) {
 		ItemID     int64   `json:"item_id"`
 		Quantity   int     `json:"quantity"`
 		TotalPrice float64 `json:"total_price"`
+		Completed  bool    `json:"completed"`
 		CreatedAt  string  `json:"created_at"`
 	}
 	var txs []Transaction
 	for rows.Next() {
 		var t Transaction
-		if err := rows.Scan(&t.ID, &t.UserID, &t.ItemID, &t.Quantity, &t.TotalPrice, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.ItemID, &t.Quantity, &t.TotalPrice, &t.Completed, &t.CreatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -103,4 +121,48 @@ func (h *Handler) Transactions(w http.ResponseWriter, r *http.Request) {
 		txs = []Transaction{}
 	}
 	writeJSON(w, txs)
+}
+
+// completeTransaction marks a transaction complete and awards the giver 1 goodwill point.
+func (h *Handler) completeTransaction(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/transactions/")
+	txID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid transaction id", http.StatusBadRequest)
+		return
+	}
+
+	var alreadyDone bool
+	var giverID int64
+	err = h.db.QueryRow(`SELECT completed, user_id FROM transactions WHERE id = ?`, txID).
+		Scan(&alreadyDone, &giverID)
+	if err == sql.ErrNoRows {
+		http.Error(w, "transaction not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if alreadyDone {
+		http.Error(w, "transaction already completed", http.StatusConflict)
+		return
+	}
+
+	if _, err := h.db.Exec(`UPDATE transactions SET completed = 1 WHERE id = ?`, txID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := awardGiverPoints(h.db, giverID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{"id": txID, "giver_id": giverID, "points_awarded": 1})
+}
+
+func awardGiverPoints(db *sql.DB, userID int64) error {
+	_, err := db.Exec(`UPDATE users SET goodwill_points = goodwill_points + 1 WHERE id = ?`, userID)
+	return err
 }
